@@ -498,7 +498,7 @@ async function saveQuizResultOnline(result) {
                     </div>
                     <div id="teacher-soal-section" class="hidden bg-white rounded-2xl border border-slate-200 shadow-sm p-4 md:p-6">
                         <div class="flex flex-wrap items-start justify-between gap-3 mb-5">
-                            <div><h3 class="text-xl font-extrabold text-slate-900">Tambah Soal dari Microsoft Word</h3><p class="text-sm text-slate-600 mt-1">Unggah dokumen Word (.docx) untuk menggantikan seluruh soal ujian aktif.</p></div>
+                            <div><h3 class="text-xl font-extrabold text-slate-900">Tambah Soal dari Microsoft Word</h3><p class="text-sm text-slate-600 mt-1">Pilih ujian berstatus DRAFT, lalu unggah dokumen Word (.docx) untuk mengganti soal pada ujian tersebut.</p></div>
                             <span class="rounded-full bg-indigo-50 text-indigo-700 text-xs font-bold px-3 py-2">IMPORT SOAL</span>
                         </div>
                         <div class="rounded-xl border border-blue-200 bg-blue-50 p-4 mb-5 text-sm text-slate-800">
@@ -511,6 +511,13 @@ D. Pilihan jawaban keempat
 E. Pilihan jawaban kelima
 Kunci: B</pre>
                             <p class="mt-2 text-slate-600">Setiap soal harus memiliki pilihan A–E dan satu baris kunci jawaban (contoh: <b>Kunci: B</b>). File yang didukung adalah .docx, bukan .doc atau PDF.</p>
+                        </div>
+                        <div class="mb-4">
+                            <label for="question-exam-select" class="block text-sm font-bold text-slate-700 mb-2">Pilih ujian tujuan impor</label>
+                            <select id="question-exam-select" class="w-full md:max-w-2xl border border-slate-300 rounded-lg p-3 text-sm bg-white">
+                                <option value="">-- Memuat ujian yang ditugaskan --</option>
+                            </select>
+                            <p class="text-xs text-slate-500 mt-1">Hanya ujian dari mata pelajaran yang ditugaskan kepada akun guru ini. Backend hanya menerima ujian berstatus DRAFT.</p>
                         </div>
                         <div class="flex flex-wrap items-center gap-3 mb-4">
                             <input id="question-word-file" type="file" accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document" class="max-w-full text-sm text-slate-700 border border-slate-300 rounded-lg p-2" />
@@ -1057,6 +1064,7 @@ Kunci: B</pre>
         quizQuestions = [];
         let questionBankLoaded = false;
         let questionBankLoadPromise = null;
+        let activeQuestionExamId = null;
 
         function questionSignature(q) {
             return `${String(q.question || '').trim()}|${(q.options || []).map(x => String(x).trim()).join('|')}|${Number(q.correct)}`.toLowerCase();
@@ -1065,14 +1073,20 @@ Kunci: B</pre>
         // Muat bank soal aktif dari Supabase. Tidak ada fallback ke soal bawaan atau cache lokal.
         async function loadExtraQuestionsFromSupabase(force = false) {
             if (!supabaseClient) return { ok: false, reason: 'Koneksi Supabase belum tersedia.' };
-            if (questionBankLoaded && !force) return { ok: true, count: extraQuizQuestions.length };
+            const ujianId = document.getElementById('question-exam-select')?.value || '';
+            if (!ujianId) {
+                extraQuizQuestions = []; quizQuestions = []; questionBankLoaded = false; updateQuestionCounts();
+                return { ok: false, reason: 'Pilih ujian DRAFT terlebih dahulu untuk melihat bank soalnya.' };
+            }
+            if (questionBankLoaded && !force && activeQuestionExamId === ujianId) return { ok: true, count: extraQuizQuestions.length };
             if (questionBankLoadPromise && !force) return questionBankLoadPromise;
             questionBankLoadPromise = (async () => {
                 const { data, error } = await supabaseClient
-                    .from('pkwu_bank_soal')
-                    .select('pertanyaan,pilihan,kunci_jawaban')
+                    .from('cbt_soal')
+                    .select('pertanyaan,pilihan,kunci_jawaban,urutan')
+                    .eq('ujian_id', ujianId)
                     .eq('aktif', true)
-                    .order('id', { ascending: true });
+                    .order('urutan', { ascending: true });
                 if (error) throw error;
                 const fromCloud = (data || []).map(row => ({
                     question: String(row.pertanyaan || ''),
@@ -1081,18 +1095,20 @@ Kunci: B</pre>
                 })).filter(q => q.question && q.options.length === 5 && Number.isInteger(q.correct));
                 extraQuizQuestions = fromCloud;
                 quizQuestions = [...fromCloud];
+                activeQuestionExamId = ujianId;
                 questionBankLoaded = true;
                 updateQuestionCounts();
                 return { ok: true, count: extraQuizQuestions.length };
             })().catch(err => {
-                console.error('Gagal memuat bank soal Supabase:', err);
+                console.error('Gagal memuat bank soal ujian dari Supabase:', err);
                 return { ok: false, reason: err?.message || String(err) };
             }).finally(() => { questionBankLoadPromise = null; });
             return questionBankLoadPromise;
         }
 
-        async function replaceQuestionBankInSupabase(questions) {
+        async function replaceQuestionBankInSupabase(questions, ujianId) {
             if (!teacherSessionToken) throw new Error('Sesi guru tidak tersedia. Silakan login guru kembali.');
+            if (!ujianId) throw new Error('Pilih ujian DRAFT tujuan impor terlebih dahulu.');
             if (!questions.length) throw new Error('Dokumen tidak berisi soal valid.');
             const payload = questions.map(q => ({
                 pertanyaan: q.question,
@@ -1101,7 +1117,7 @@ Kunci: B</pre>
                 signature: questionSignature(q)
             }));
             // Perubahan bank soal dilakukan di server menggunakan sesi guru bertanda tangan.
-            const result = await callCbtAdmin('replace_bank', { questions: payload }, teacherSessionToken);
+            const result = await callCbtAdmin('replace_bank', { ujian_id: ujianId, questions: payload }, teacherSessionToken);
             if (result.count !== questions.length) {
                 throw new Error(`Verifikasi bank soal gagal. Diharapkan ${questions.length} soal, server melaporkan ${result.count ?? 0}.`);
             }
@@ -1647,6 +1663,7 @@ Kunci: B</pre>
         let adminAuthSession = null;
         let teacherProfile = null;
         let teacherAssignedSubjects = [];
+        let teacherAssignedExams = [];
         async function callCbtManagement(action, payload = {}) {
             if (!adminAuthSession?.access_token) throw new Error('Sesi administrator tidak ditemukan. Silakan login kembali.');
             const response = await fetch(`${SUPABASE_URL}/functions/v1/cbt-management`, {method:'POST',headers:{'Content-Type':'application/json','apikey':SUPABASE_KEY,'Authorization':`Bearer ${adminAuthSession.access_token}`},body:JSON.stringify({action,...payload})});
@@ -2096,6 +2113,19 @@ Kunci: B</pre>
             box.classList.remove('hidden');
         }
 
+        function populateQuestionExamSelect(exams) {
+            const sel = document.getElementById('question-exam-select');
+            if (!sel) return;
+            const old = sel.value;
+            const esc = value => String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+            const rows = (exams || []).filter(u => String(u.status || '').toLowerCase() === 'draft');
+            sel.innerHTML = '<option value="">-- Pilih ujian DRAFT --</option>' + rows.map(u => {
+                const m = u.cbt_mata_pelajaran || {};
+                return `<option value="${esc(u.id)}">${esc(m.kode || '')} — ${esc(m.nama || '')} | ${esc(u.judul || 'Ujian tanpa judul')}</option>`;
+            }).join('');
+            if (rows.some(u => u.id === old)) sel.value = old;
+        }
+
         async function loadTeacherAssignedData() {
             const subjectsBody = document.getElementById('teacher-assigned-subjects');
             const examsBody = document.getElementById('teacher-assigned-exams');
@@ -2132,6 +2162,8 @@ Kunci: B</pre>
                     if (error) throw new Error('Mata pelajaran berhasil dibaca, tetapi daftar ujian gagal dimuat: ' + error.message);
                     exams = Array.isArray(data) ? data : [];
                 }
+                teacherAssignedExams = exams;
+                populateQuestionExamSelect(teacherAssignedExams);
                 examsBody.innerHTML = exams.length
                     ? exams.map(u => { const m = u.cbt_mata_pelajaran || {}; const status = String(u.status || 'draft').toLowerCase(); const badge = status === 'terbit' ? 'bg-emerald-100 text-emerald-800' : status === 'ditutup' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'; return `<tr class="border-t"><td class="p-3"><b>${esc(m.kode || '-')}</b><div>${esc(m.nama || '-')}</div><div class="text-xs text-slate-500">Kelas ${esc(m.jenjang_kelas || '-')}</div></td><td class="p-3"><b>${esc(u.judul || '-')}</b><div class="text-slate-500">${esc(u.materi || '-')}</div></td><td class="p-3">${esc(u.durasi_menit ?? '-')} menit</td><td class="p-3">${esc(u.nilai_tuntas ?? '-')} / 100</td><td class="p-3"><span class="rounded-full px-3 py-1 text-xs font-bold ${badge}">${esc(status.toUpperCase())}</span></td></tr>`; }).join('')
                     : '<tr><td colspan="5" class="p-3 text-slate-500">Belum ada ujian untuk mata pelajaran yang ditugaskan.</td></tr>';
@@ -2171,13 +2203,27 @@ Kunci: B</pre>
             if (section === 'mapel') loadTeacherAssignedData();
             if (section === 'soal') {
                 updateQuestionCounts();
-                loadExtraQuestionsFromSupabase(true).then(status => {
+                loadTeacherAssignedData().then(() => loadExtraQuestionsFromSupabase(true)).then(status => {
                     updateQuestionCounts();
-                    if (status.ok) showQuestionImportMessage(`Bank soal aktif dari Supabase: ${quizQuestions.length} soal. Impor Word berikutnya akan menggantikan seluruh soal ini.`, true);
-                    else showQuestionImportMessage('Bank soal belum dapat dimuat dari Supabase: ' + status.reason);
+                    if (status.ok) showQuestionImportMessage(`Bank soal untuk ujian terpilih: ${quizQuestions.length} soal. Impor Word akan mengganti soal pada ujian tersebut saja.`, true);
+                    else showQuestionImportMessage('Bank soal belum dapat dimuat: ' + status.reason);
                 });
             }
         }
+        document.addEventListener('change', (event) => {
+            if (event.target?.id === 'question-exam-select') {
+                questionBankLoaded = false;
+                activeQuestionExamId = null;
+                extraQuizQuestions = [];
+                quizQuestions = [];
+                updateQuestionCounts();
+                loadExtraQuestionsFromSupabase(true).then(status => {
+                    if (status.ok) showQuestionImportMessage(`Bank soal ujian terpilih berhasil dimuat: ${status.count} soal.`, true);
+                    else showQuestionImportMessage(status.reason);
+                });
+            }
+        });
+
         function showQuestionImportMessage(message, success = false) {
             const box = document.getElementById('question-import-message');
             if (!box) return;
@@ -2291,6 +2337,10 @@ function docsPrintMinutes(){
             if (!/\.docx$/i.test(file.name)) { showQuestionImportMessage('Format belum didukung. Simpan dokumen sebagai Word Document (*.docx), lalu unggah kembali.'); return; }
             if (!window.mammoth) { showQuestionImportMessage('Pembaca Word belum termuat. Periksa koneksi internet, lalu coba kembali.'); return; }
             try {
+                const ujianId = document.getElementById('question-exam-select')?.value || '';
+                if (!ujianId) throw new Error('Pilih ujian DRAFT tujuan impor terlebih dahulu.');
+                const selectedExam = teacherAssignedExams.find(u => u.id === ujianId);
+                if (!selectedExam || String(selectedExam.status || '').toLowerCase() !== 'draft') throw new Error('Ujian tidak valid atau bukan berstatus DRAFT. Muat ulang daftar ujian.');
                 const arrayBuffer = await file.arrayBuffer();
                 // Mammoth raw text menghilangkan nomor/huruf daftar otomatis Word.
                 // Ambil HTML agar struktur daftar (1., A., dst.) tetap terbaca.
@@ -2355,14 +2405,15 @@ function docsPrintMinutes(){
                 if (new Set(signatures).size !== signatures.length) throw new Error('Dokumen berisi soal duplikat. Perbaiki duplikat sebelum mengganti bank soal.');
                 if (!supabaseClient) throw new Error('Koneksi Supabase belum dikonfigurasi. Tidak ada perubahan pada bank soal.');
                 // Validasi semua soal sebelum mengganti bank aktif. Soal Word menggantikan seluruh bank.
-                await replaceQuestionBankInSupabase(parsed);
+                await replaceQuestionBankInSupabase(parsed, ujianId);
                 extraQuizQuestions = [...parsed];
                 quizQuestions = [...parsed];
+                activeQuestionExamId = ujianId;
                 questionBankLoaded = true;
                 try { localStorage.removeItem('pkwu_extra_questions'); } catch(e) {}
                 updateQuestionCounts();
                 const extraNote = malformedCount > 0 ? ` ${malformedCount} soal dilewati karena formatnya belum lengkap.` : '';
-                showQuestionImportMessage(`Berhasil menerbitkan ${parsed.length} soal dari Word. Seluruh soal ujian aktif sekarang diganti dengan dokumen ini; 40 soal bawaan tidak digunakan.${extraNote} Siswa akan mengambil bank soal terbaru dari Supabase saat login.`, true);
+                showQuestionImportMessage(`Berhasil menyimpan ${parsed.length} soal ke ujian "${selectedExam.judul || 'tanpa judul'}". Hanya bank soal ujian ini yang diganti.${extraNote} Ujian lain tidak diubah.`, true);
                 document.getElementById('question-word-file').value = '';
             } catch (err) {
                 console.error('Import soal Word gagal:', err);
