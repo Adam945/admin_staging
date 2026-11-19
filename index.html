@@ -2291,8 +2291,39 @@ function docsPrintMinutes(){
             if (!/\.docx$/i.test(file.name)) { showQuestionImportMessage('Format belum didukung. Simpan dokumen sebagai Word Document (*.docx), lalu unggah kembali.'); return; }
             if (!window.mammoth) { showQuestionImportMessage('Pembaca Word belum termuat. Periksa koneksi internet, lalu coba kembali.'); return; }
             try {
-                const result = await mammoth.extractRawText({arrayBuffer: await file.arrayBuffer()});
-                const text = (result.value || '').replace(/\r/g, '').replace(/[\u00a0]/g, ' ');
+                const arrayBuffer = await file.arrayBuffer();
+                // Mammoth raw text menghilangkan nomor/huruf daftar otomatis Word.
+                // Ambil HTML agar struktur daftar (1., A., dst.) tetap terbaca.
+                const htmlResult = await mammoth.convertToHtml({arrayBuffer});
+                const parsedDoc = new DOMParser().parseFromString(htmlResult.value || '', 'text/html');
+                const linesFromHtml = [];
+                const walkWordNodes = (node) => {
+                    for (const child of Array.from(node.children || [])) {
+                        const tag = child.tagName.toLowerCase();
+                        if (tag === 'ol' || tag === 'ul') {
+                            const items = Array.from(child.children).filter(el => el.tagName.toLowerCase() === 'li');
+                            const isChoices = tag === 'ol' && items.length === 5;
+                            items.forEach((li, index) => {
+                                const value = (li.innerText || li.textContent || '').replace(/\s+/g, ' ').trim();
+                                if (!value) return;
+                                if (isChoices) linesFromHtml.push(String.fromCharCode(65 + index) + '. ' + value);
+                                else linesFromHtml.push(String(linesFromHtml.filter(x => /^\s*\d{1,3}[.)\-:]/.test(x)).length + 1) + '. ' + value);
+                            });
+                        } else if (tag === 'p' || tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'div') {
+                            const value = (child.innerText || child.textContent || '').replace(/\s+/g, ' ').trim();
+                            if (value) linesFromHtml.push(value);
+                            // Proses daftar bersarang jika ada.
+                            walkWordNodes(child);
+                        } else {
+                            walkWordNodes(child);
+                        }
+                    }
+                };
+                walkWordNodes(parsedDoc.body);
+                const rawResult = await mammoth.extractRawText({arrayBuffer});
+                const rawText = (rawResult.value || '').replace(/\r/g, '').replace(/[\u00a0]/g, ' ');
+                // Gunakan hasil HTML bila struktur daftar tersedia; fallback ke teks biasa.
+                const text = linesFromHtml.length ? linesFromHtml.join('\n') : rawText;
                 const lines = text.split('\n').map(line => line.trim()).filter(Boolean);
                 const parsed = [];
                 let current = null;
